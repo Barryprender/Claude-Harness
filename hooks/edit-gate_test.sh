@@ -14,12 +14,19 @@
 
 set -u
 
-GATE=$(cd "$(dirname "$0")" && pwd)/edit-gate.sh
+HOOKS=$(cd "$(dirname "$0")" && pwd)
+GATE=$HOOKS/edit-gate.sh
 pass=0
 fail=0
 
 ok()  { pass=$((pass + 1)); printf 'PASS  %s\n' "$1"; }
 bad() { fail=$((fail + 1)); printf 'FAIL  %s\n' "$1"; }
+
+# The gates only run verify.sh in a repository on the trust list. Each scratch
+# repository is added to a list of this test's own.
+CLAUDE_HARNESS_TRUST=$(mktemp)
+export CLAUDE_HARNESS_TRUST
+trap 'rm -f "$CLAUDE_HARNESS_TRUST"' EXIT
 
 # A throwaway repository with one changed file and the given verify.sh body.
 scratch() { # $1 = verify.sh body, or empty for no verify.sh
@@ -29,7 +36,13 @@ scratch() { # $1 = verify.sh body, or empty for no verify.sh
     git -C "$d" config user.name t
     [ -n "$1" ] && printf '%s\n' "$1" > "$d/verify.sh"
     echo content > "$d/changed.txt"
+    git -C "$d" rev-parse --show-toplevel >> "$CLAUDE_HARNESS_TRUST"
     printf '%s' "$d"
+}
+
+commit_all() { # $1 = directory
+    git -C "$1" add . >/dev/null 2>&1
+    git -C "$1" commit -qm seed >/dev/null 2>&1
 }
 
 decide() { # $1 = directory; prints block | report | silent
@@ -64,8 +77,7 @@ case_is "verify.sh passes (exit 0)"              0 silent
 # A clean tree is not this gate's business, whatever verify.sh would say.
 d=$(scratch "#!/bin/sh
 exit 1")
-git -C "$d" add . >/dev/null 2>&1
-git -C "$d" commit -qm seed >/dev/null 2>&1
+commit_all "$d"
 got=$(decide "$d")
 rm -rf "$d"
 if [ "$got" = silent ]; then
@@ -143,6 +155,109 @@ if [ "$rc" -eq 0 ]; then
     ok "the gate itself exits 0 while blocking"
 else
     bad "the gate itself exits 0 while blocking: got $rc"
+fi
+
+# --- the review's cases: each of these used to be wrong -----------------------
+
+# A deleted file is a change. The gate used to skip any path that was not a
+# file, so deleting one was the one edit it could not see.
+d=$(scratch '#!/bin/sh
+[ -f keep.txt ] || { echo "FAILED: keep.txt is gone"; exit 1; }')
+echo x > "$d/keep.txt"
+commit_all "$d"
+rm "$d/keep.txt"
+got=$(decide "$d")
+rm -rf "$d"
+if [ "$got" = block ]; then ok "a deleted file is checked: $got"; else bad "a deleted file is checked: expected block, got $got"; fi
+
+# A change that keeps an old timestamp - cp -p, tar, git checkout - is still a
+# change. The gate used to look only at files modified in the last two minutes.
+d=$(scratch "#!/bin/sh
+echo 'FAILED: it'
+exit 1")
+touch -d '2001-01-01' "$d/changed.txt" "$d/verify.sh"
+got=$(decide "$d")
+rm -rf "$d"
+if [ "$got" = block ]; then ok "a change with an old timestamp is checked: $got"; else bad "a change with an old timestamp is checked: expected block, got $got"; fi
+
+# Nothing changed since the last check - an ls after an edit - runs nothing.
+d=$(scratch "#!/bin/sh
+echo 'FAILED: it'
+exit 1")
+first=$(decide "$d")
+second=$(decide "$d")
+rm -rf "$d"
+if [ "$first/$second" = block/silent ]; then
+    ok "a second run with nothing changed is silent"
+else
+    bad "a second run with nothing changed is silent: expected block/silent, got $first/$second"
+fi
+
+# A repository not on the trust list: its verify.sh is not run, and that is
+# said out loud.
+d=$(scratch '#!/bin/sh
+touch ran
+exit 1')
+kept=$(cat "$CLAUDE_HARNESS_TRUST")
+: > "$CLAUDE_HARNESS_TRUST"
+got=$(decide "$d")
+if [ -f "$d/ran" ]; then ran=yes; else ran=no; fi
+printf '%s\n' "$kept" > "$CLAUDE_HARNESS_TRUST"
+rm -rf "$d"
+if [ "$got/$ran" = report/no ]; then
+    ok "an untrusted repository is reported and its verify.sh is not run"
+else
+    bad "an untrusted repository is reported and its verify.sh is not run: got $got, ran=$ran"
+fi
+
+# A failure that was already there at the end of the last turn does not block
+# an unrelated edit. A different failure still does.
+# shellcheck disable=SC2016 # the body is a script; it expands when it runs
+d=$(scratch '#!/bin/sh
+echo "FAILED: $(cat reason.txt)"
+exit 1')
+echo "old breakage" > "$d/reason.txt"
+(cd "$d" && printf '{}' | sh "$HOOKS/stop-build.sh" >/dev/null 2>&1)
+(cd "$d" && printf '{}' | sh "$HOOKS/turn-start.sh" >/dev/null 2>&1)
+echo other > "$d/other.txt"
+same=$(decide "$d")
+echo "new breakage" > "$d/reason.txt"
+different=$(decide "$d")
+rm -rf "$d"
+if [ "$same/$different" = report/block ]; then
+    ok "a failure from before this turn is reported, a new one blocks"
+else
+    bad "a failure from before this turn is reported, a new one blocks: expected report/block, got $same/$different"
+fi
+
+# Nothing is cut off the bottom of the report.
+# shellcheck disable=SC2016 # the body is a script; it expands when it runs
+d=$(scratch '#!/bin/sh
+i=1
+while [ $i -le 40 ]; do echo "FAILED: check $i"; i=$((i + 1)); done
+exit 1')
+out=$(cd "$d" && printf '{}' | sh "$GATE" 2>&1)
+rm -rf "$d"
+case "$out" in
+    *'FAILED: check 40'*) ok "a long failure report is not cut short" ;;
+    *)                    bad "a long failure report is not cut short: got $out" ;;
+esac
+
+# The fallback, for a project with no verify.sh, reports and never writes.
+if command -v gofmt >/dev/null 2>&1; then
+    d=$(scratch "")
+    printf 'package x\nfunc  f()  {}\n' > "$d/x.go"
+    before=$(cat "$d/x.go")
+    got=$(decide "$d")
+    after=$(cat "$d/x.go")
+    rm -rf "$d"
+    if [ "$got" = block ] && [ "$before" = "$after" ]; then
+        ok "the fallback reports unformatted Go and leaves the file alone"
+    else
+        bad "the fallback reports unformatted Go and leaves the file alone: got $got"
+    fi
+else
+    printf 'SKIP  fallback gofmt: gofmt is not installed (this is not a pass)\n'
 fi
 
 printf '\n%d/%d passed\n' "$pass" "$((pass + fail))"
