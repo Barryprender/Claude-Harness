@@ -83,10 +83,11 @@ thing it reads. That is forced feedback, and nothing here claims it is more.
 ### Only in repositories you trust
 
 The hooks are global, so they fire in every repository you open. They run a
-repository's `verify.sh` only if its root is a line in
-`~/.claude/harness-trusted`. Anywhere else they run nothing and report that
-nothing was verified. See
-[ADR 0004](docs/adr/0004-run-verify-only-in-trusted-repositories.md).
+repository's `verify.sh` only if that repository's own local git config says
+`harness.trusted = true`. Each project carries its own switch; a clone starts
+without it. Anywhere else they run nothing and report that nothing was
+verified. See
+[ADR 0005](docs/adr/0005-keep-the-trust-switch-in-each-repository.md).
 
 ### Block where a claim becomes permanent
 
