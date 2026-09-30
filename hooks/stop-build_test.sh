@@ -18,12 +18,6 @@ fail=0
 ok()  { pass=$((pass + 1)); printf 'PASS  %s\n' "$1"; }
 bad() { fail=$((fail + 1)); printf 'FAIL  %s\n' "$1"; }
 
-# The gates only run verify.sh in a repository on the trust list. Each scratch
-# repository is added to a list of this test's own.
-CLAUDE_HARNESS_TRUST=$(mktemp)
-export CLAUDE_HARNESS_TRUST
-trap 'rm -f "$CLAUDE_HARNESS_TRUST"' EXIT
-
 scratch() { # $1 = verify.sh body, or empty for no verify.sh
     d=$(mktemp -d)
     git -C "$d" init -q .
@@ -31,7 +25,7 @@ scratch() { # $1 = verify.sh body, or empty for no verify.sh
     git -C "$d" config user.name t
     [ -n "$1" ] && printf '%s\n' "$1" > "$d/verify.sh"
     echo content > "$d/changed.txt"
-    git -C "$d" rev-parse --show-toplevel >> "$CLAUDE_HARNESS_TRUST"
+    git -C "$d" config harness.trusted true   # the gates only run verify.sh in a trusted repository
     printf '%s' "$d"
 }
 
@@ -144,19 +138,17 @@ case "$out" in
     *)        bad "a change made during the turn is reported: got $out" ;;
 esac
 
-# A repository not on the trust list: its verify.sh is not run, and that is
+# A repository not marked as trusted: its verify.sh is not run, and that is
 # said out loud.
 d=$(scratch '#!/bin/sh
 touch ran
 exit 1')
-kept=$(cat "$CLAUDE_HARNESS_TRUST")
-: > "$CLAUDE_HARNESS_TRUST"
+git -C "$d" config --unset harness.trusted
 out=$(run "$d")
 if [ -f "$d/ran" ]; then ran=yes; else ran=no; fi
-printf '%s\n' "$kept" > "$CLAUDE_HARNESS_TRUST"
 rm -rf "$d"
 case "$ran/$out" in
-    no/*"not in the harness trust list"*) ok "an untrusted repository is reported and its verify.sh is not run" ;;
+    no/*"not been marked as trusted"*) ok "an untrusted repository is reported and its verify.sh is not run" ;;
     *) bad "an untrusted repository is reported and its verify.sh is not run: ran=$ran, got $out" ;;
 esac
 
