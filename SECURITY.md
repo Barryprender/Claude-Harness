@@ -2,7 +2,7 @@
 
 ## What this repository is
 
-Four shell scripts that run as editor hooks, a shell template, and a stub Go
+Five shell scripts that run as editor hooks, one git hook, a shell template, and a stub Go
 service that exists so the scripts have something to act on. It is a
 demonstration. Nothing here is a service, and nothing here should be exposed to
 a network.
@@ -73,11 +73,24 @@ the hooks in a repository separate from the project being worked on. A change
 to a hook then appears in a different `git status`, on its own, instead of
 inside a forty-file diff where nobody will look at it.
 
+### The agent and its own judge
+
+An agent that is told a check fails can make the check pass by fixing the code,
+or by editing the check: `exit 0` at the top of `verify.sh`, a deleted test, a
+changed CI workflow. The second is not an attack. It is the shortest path to
+green, and CI does not catch it, because CI runs the same edited file.
+
+`commit-gate.sh` asks the operator before any commit that touches a
+`verify.sh`, the `hooks/` directory, `.claude/`, `.github/workflows/` or a
+top-level `settings*.json`. It asks; it cannot stop an edit that has already
+happened, and it cannot see a change that is never committed. A protected
+branch with review is still the control. This is the reminder to use it.
+
 ## Dependencies
 
 There are none. The example service uses the Go standard library only, and the
-hooks use the shell, `git`, `awk`, `sed` and - in `commit-gate.sh` only -
-`python`. There is therefore no SBOM in this repository: an SBOM of nothing is
+hooks use the shell, `git`, `awk`, `sed` and - in `commit-gate.sh` only, to
+read the command line - `python`. The commit-msg git hook needs no python. There is therefore no SBOM in this repository: an SBOM of nothing is
 a file that only pretends to tell you something.
 
 A project that adopts the harness will have dependencies, and it should carry
@@ -88,9 +101,19 @@ reporting a pass.
 
 ## What the hooks can do to your machine
 
-They read. They run one script you already have: your own project's
-`verify.sh`. The only write is `gofmt -w` on a Go file you just edited, and
-only in the fallback path for a project that has no `verify.sh` of its own.
+They run a repository's `verify.sh` - and, for a repository without one, `go
+vet` and `go build` - **only if you have put that repository on the trust
+list** (`~/.claude/harness-trusted`, one root per line). The hooks are wired
+globally, so without the list, opening a repository somebody else wrote and
+making one edit would run their `verify.sh` on your machine. In a repository
+that is not on the list they run nothing and say so. See
+[ADR 0004](docs/adr/0004-run-verify-only-in-trusted-repositories.md).
+
+Trusting a repository trusts every future version of its `verify.sh`,
+including one that arrives in a pull.
+
+They never change your files. The only writes are their own state files,
+inside the repository's git directory (`.git/claude-harness/`).
 
 Read them before you wire them up. They are short, and a hook you have not read
 is a program you have given a shell on every edit you make.
