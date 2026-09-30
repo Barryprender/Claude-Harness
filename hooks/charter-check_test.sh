@@ -110,6 +110,34 @@ else
     bad "a complete repository produces no output: got $out"
 fi
 
+# --- run from a subfolder, and from a worktree --------------------------------
+#
+# Both used to be silent: the check tested for a .git directory in the current
+# folder. A subfolder has none, and in a worktree .git is a file.
+
+d=$(full_repo)
+rm -f "$d/SECURITY.md"
+out=$(run "$d/docs")
+rm -rf "$d"
+case "$out" in
+    *SECURITY.md*) ok "run from a subfolder, the whole repository is checked" ;;
+    *)             bad "run from a subfolder, the whole repository is checked: got $out" ;;
+esac
+
+d=$(full_repo)
+rm -f "$d/SECURITY.md"
+git -C "$d" add . >/dev/null 2>&1
+git -C "$d" commit -qm seed >/dev/null 2>&1
+wt=$(mktemp -d)
+rmdir "$wt"
+git -C "$d" worktree add "$wt" >/dev/null 2>&1
+out=$(run "$wt")
+rm -rf "$d" "$wt"
+case "$out" in
+    *SECURITY.md*) ok "a worktree is checked" ;;
+    *)             bad "a worktree is checked: got $out" ;;
+esac
+
 # --- not a project at all -----------------------------------------------------
 
 d=$(mktemp -d)
