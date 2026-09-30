@@ -24,7 +24,9 @@ GIT_HOOKS = os.path.join(HERE, "git")
 # Assembled from pieces so this file's own text cannot trip a gate that
 # inspects the command running it.
 TRAILER = "Co-" + "Authored-By"
+GENERATED = "Generated " + "with"
 COMMIT = "git " + "commit"
+PR = "gh " + "pr"
 ADD = "git " + "add"
 
 
@@ -32,7 +34,7 @@ def run(d, *a):
     subprocess.run(a, cwd=d, capture_output=True, timeout=30)
 
 
-def repo(untracked=(), staged=(), modified=(), hook=True):
+def repo(untracked=(), staged=(), modified=(), hook=True, body="x"):
     """A repository with a seed commit, then the given files in the given state."""
     d = tempfile.mkdtemp()
     run(d, "git", "init", "-q")
@@ -58,7 +60,7 @@ def repo(untracked=(), staged=(), modified=(), hook=True):
         write(name, "x")
         run(d, "git", "add", "--", name)
     for name in untracked:
-        write(name, "x")
+        write(name, body)
     return d
 
 
@@ -146,6 +148,22 @@ CASES = [
 
     ("a command the gate cannot parse",
      COMMIT + ' -m "x', {}, "ask"),
+
+    # Pull requests: no git hook sees them, so this gate reads them.
+    ("a pull request body with a trailer",
+     PR + ' create --title x --body "y\n\n' + TRAILER + ': A <a@b.c>"', {}, "deny"),
+    ("a pull request body naming an AI tool",
+     PR + ' edit 5 -b "' + GENERATED + ' [Claude Code](https://claude.com)"', {}, "deny"),
+    ("a pull request body with a trailer in capitals",
+     PR + ' create -t x -b "y\n\n' + TRAILER.upper() + ': A"', {}, "deny"),
+    ("a pull request body in a file",
+     PR + ' create -t x --body-file body.md', dict(untracked=["body.md"], body=TRAILER + ": A"), "deny"),
+    ("a pull request body on stdin",
+     'cat <<EOF | ' + PR + ' create -t x -F -\ny\n\n' + TRAILER + ': A\nEOF', {}, "deny"),
+    ("a pull request body file that is not there",
+     PR + ' create -t x --body-file missing.md', {}, "ask"),
+    ("a clean pull request",
+     PR + ' create --title x --body "' + GENERATED + ' protoc"', {}, "silent"),
 ]
 
 failed = 0
