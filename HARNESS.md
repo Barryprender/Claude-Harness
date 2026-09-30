@@ -61,17 +61,32 @@ point it at your project, delete what does not apply.
 
 ## What the harness supplies
 
-Four gates. Each one is a shell script that reads a JSON event on stdin and
-writes a JSON decision on stdout.
+Five Claude Code hooks and one git hook. Each Claude Code hook is a shell
+script that reads a JSON event on stdin and writes a JSON decision on stdout.
 
 | Gate | Fires | Acts |
 |------|-------|------|
-| `hooks/edit-gate.sh` | after any edit, however it was made | **blocks** |
+| `hooks/edit-gate.sh` | after any edit, however it was made | **forced feedback** |
 | `hooks/commit-gate.sh` | before a `git commit` runs | **blocks** |
+| `hooks/git/commit-msg` | inside git, on the final commit message | **blocks** |
 | `hooks/stop-build.sh` | when the agent's turn ends | reports |
+| `hooks/turn-start.sh` | when the operator sends a prompt | snapshots the tree |
 | `hooks/charter-check.sh` | once, at session start | reports |
 
-Wire them with `settings.example.json`.
+Wire the Claude Code hooks with `settings.example.json`, and the git hook with
+`git config --global core.hooksPath <harness>/hooks/git`.
+
+The edit gate's block comes *after* the edit. PostToolUse cannot undo or
+prevent anything; the block puts the failure in front of the agent as the next
+thing it reads. That is forced feedback, and nothing here claims it is more.
+
+### Only in repositories you trust
+
+The hooks are global, so they fire in every repository you open. They run a
+repository's `verify.sh` only if its root is a line in
+`~/.claude/harness-trusted`. Anywhere else they run nothing and report that
+nothing was verified. See
+[ADR 0004](docs/adr/0004-run-verify-only-in-trusted-repositories.md).
 
 ### Block where a claim becomes permanent
 
@@ -87,7 +102,10 @@ thing the block is preventing. So `stop-build.sh` reports and the operator
 decides whether it is worth another turn.
 
 `edit-gate.sh` blocks, because a formatting or static-analysis failure has a
-fixed, known repair and the agent is the right one to make it.
+fixed, known repair and the agent is the right one to make it. It does not
+block on a failure that was already there, word for word, at the end of the
+last turn: that one is reported, or every unrelated edit would be blocked by
+it.
 
 ### A gate must never break the session
 
@@ -97,10 +115,12 @@ crashes takes down the workflow it was guarding, and the operator's first
 instinct will be to remove the guardrail.
 
 This is why the gates are defensive about their own tools: if Python is not on
-the path, `commit-gate.sh` says the count could not be taken and asks for
+the path, `commit-gate.sh` says the command could not be inspected and asks for
 confirmation, rather than dying or — much worse — waving the commit through.
+The same holds when the commit-msg git hook is not installed: the message
+would be checked by nothing, so the commit gate asks.
 
-### Changed files come from `git status`
+### Changed files come from the tree
 
 Not from the event payload.
 
@@ -108,7 +128,13 @@ An earlier version of the edit gate matched the edit tools only. A careful,
 surgical, multi-line change is easier to make through a shell script than
 through an edit tool — so the most careful edits were exactly the ones
 bypassing the gate. Anything that infers "what changed" from the shape of the
-event will miss whatever it did not anticipate. `git status` already knows.
+event will miss whatever it did not anticipate.
+
+The gates hash every dirty file and compare against a snapshot: the edit gate
+against the state it last checked, the end-of-turn gate against the state
+`turn-start.sh` recorded when the prompt arrived. A deleted file is a change.
+A file whose timestamp was kept by `cp -p` or `git checkout` is a change. A
+command that changed nothing, such as `ls`, runs nothing.
 
 ### Gates are tested
 
@@ -122,7 +148,9 @@ only thing that can tell the difference.
 sh hooks/edit-gate_test.sh
 sh hooks/stop-build_test.sh
 sh hooks/charter-check_test.sh
+sh hooks/git/commit-msg_test.sh
 python hooks/commit-gate_test.py
 ```
 
-CI runs all four on every push.
+CI runs all five on every push. Each bug found by review has a case of its own,
+written to fail against the old gate before the gate was fixed.
