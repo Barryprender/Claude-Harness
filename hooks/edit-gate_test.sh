@@ -22,12 +22,6 @@ fail=0
 ok()  { pass=$((pass + 1)); printf 'PASS  %s\n' "$1"; }
 bad() { fail=$((fail + 1)); printf 'FAIL  %s\n' "$1"; }
 
-# The gates only run verify.sh in a repository on the trust list. Each scratch
-# repository is added to a list of this test's own.
-CLAUDE_HARNESS_TRUST=$(mktemp)
-export CLAUDE_HARNESS_TRUST
-trap 'rm -f "$CLAUDE_HARNESS_TRUST"' EXIT
-
 # A throwaway repository with one changed file and the given verify.sh body.
 scratch() { # $1 = verify.sh body, or empty for no verify.sh
     d=$(mktemp -d)
@@ -36,7 +30,7 @@ scratch() { # $1 = verify.sh body, or empty for no verify.sh
     git -C "$d" config user.name t
     [ -n "$1" ] && printf '%s\n' "$1" > "$d/verify.sh"
     echo content > "$d/changed.txt"
-    git -C "$d" rev-parse --show-toplevel >> "$CLAUDE_HARNESS_TRUST"
+    git -C "$d" config harness.trusted true   # the gates only run verify.sh in a trusted repository
     printf '%s' "$d"
 }
 
@@ -193,22 +187,36 @@ else
     bad "a second run with nothing changed is silent: expected block/silent, got $first/$second"
 fi
 
-# A repository not on the trust list: its verify.sh is not run, and that is
+# A repository not marked as trusted: its verify.sh is not run, and that is
 # said out loud.
 d=$(scratch '#!/bin/sh
 touch ran
 exit 1')
-kept=$(cat "$CLAUDE_HARNESS_TRUST")
-: > "$CLAUDE_HARNESS_TRUST"
+git -C "$d" config --unset harness.trusted
 got=$(decide "$d")
 if [ -f "$d/ran" ]; then ran=yes; else ran=no; fi
-printf '%s\n' "$kept" > "$CLAUDE_HARNESS_TRUST"
 rm -rf "$d"
 if [ "$got/$ran" = report/no ]; then
     ok "an untrusted repository is reported and its verify.sh is not run"
 else
     bad "an untrusted repository is reported and its verify.sh is not run: got $got, ran=$ran"
 fi
+
+# A yes in the global git config does not count. Trust is per repository, or
+# one line in a global file would trust every clone at once.
+d=$(scratch '#!/bin/sh
+touch ran
+exit 1')
+git -C "$d" config --unset harness.trusted
+home=$(mktemp -d)
+HOME=$home git config --global harness.trusted true
+out=$(cd "$d" && printf '{}' | HOME=$home sh "$GATE" 2>&1)
+if [ -f "$d/ran" ]; then ran=yes; else ran=no; fi
+rm -rf "$d" "$home"
+case "$ran/$out" in
+    no/*"not been marked as trusted"*) ok "a global harness.trusted does not trust a repository" ;;
+    *) bad "a global harness.trusted does not trust a repository: ran=$ran, got $out" ;;
+esac
 
 # A failure that was already there at the end of the last turn does not block
 # an unrelated edit. A different failure still does.
