@@ -10,12 +10,19 @@
 
 set -u
 
-GATE=$(cd "$(dirname "$0")" && pwd)/stop-build.sh
+HOOKS=$(cd "$(dirname "$0")" && pwd)
+GATE=$HOOKS/stop-build.sh
 pass=0
 fail=0
 
 ok()  { pass=$((pass + 1)); printf 'PASS  %s\n' "$1"; }
 bad() { fail=$((fail + 1)); printf 'FAIL  %s\n' "$1"; }
+
+# The gates only run verify.sh in a repository on the trust list. Each scratch
+# repository is added to a list of this test's own.
+CLAUDE_HARNESS_TRUST=$(mktemp)
+export CLAUDE_HARNESS_TRUST
+trap 'rm -f "$CLAUDE_HARNESS_TRUST"' EXIT
 
 scratch() { # $1 = verify.sh body, or empty for no verify.sh
     d=$(mktemp -d)
@@ -24,6 +31,7 @@ scratch() { # $1 = verify.sh body, or empty for no verify.sh
     git -C "$d" config user.name t
     [ -n "$1" ] && printf '%s\n' "$1" > "$d/verify.sh"
     echo content > "$d/changed.txt"
+    git -C "$d" rev-parse --show-toplevel >> "$CLAUDE_HARNESS_TRUST"
     printf '%s' "$d"
 }
 
@@ -94,6 +102,63 @@ if [ "$rc" -eq 0 ]; then
 else
     bad "the hook itself exits 0 while reporting a failure: got $rc"
 fi
+
+# --- the review's cases: each of these used to be wrong -----------------------
+
+# A nested project. The root verify.sh passes and does not cover sub/; the
+# change is in sub/, so sub/verify.sh is the one that has to run. This gate
+# used to ask only the root, and said nothing.
+d=$(scratch "$(body 0)")
+mkdir "$d/sub"
+body 1 > "$d/sub/verify.sh"
+git -C "$d" add . >/dev/null 2>&1
+git -C "$d" commit -qm seed >/dev/null 2>&1
+echo change > "$d/sub/x.txt"
+out=$(run "$d")
+rm -rf "$d"
+case "$out" in
+    *sub/verify.sh*FAILED*) ok "a failing nested verify.sh is reported" ;;
+    *)                      bad "a failing nested verify.sh is reported: got $out" ;;
+esac
+
+# Only this turn's changes. A file left dirty before the turn started, and not
+# touched since, is not this turn's work.
+d=$(scratch "$(body 1)")
+(cd "$d" && printf '{}' | sh "$HOOKS/turn-start.sh" >/dev/null 2>&1)
+out=$(run "$d")
+rm -rf "$d"
+if [ -z "$out" ]; then
+    ok "a tree left dirty before the turn is silent"
+else
+    bad "a tree left dirty before the turn is silent: got $out"
+fi
+
+# The same tree, with one change made during the turn, is reported.
+d=$(scratch "$(body 1)")
+(cd "$d" && printf '{}' | sh "$HOOKS/turn-start.sh" >/dev/null 2>&1)
+echo more >> "$d/changed.txt"
+out=$(run "$d")
+rm -rf "$d"
+case "$out" in
+    *FAILED*) ok "a change made during the turn is reported" ;;
+    *)        bad "a change made during the turn is reported: got $out" ;;
+esac
+
+# A repository not on the trust list: its verify.sh is not run, and that is
+# said out loud.
+d=$(scratch '#!/bin/sh
+touch ran
+exit 1')
+kept=$(cat "$CLAUDE_HARNESS_TRUST")
+: > "$CLAUDE_HARNESS_TRUST"
+out=$(run "$d")
+if [ -f "$d/ran" ]; then ran=yes; else ran=no; fi
+printf '%s\n' "$kept" > "$CLAUDE_HARNESS_TRUST"
+rm -rf "$d"
+case "$ran/$out" in
+    no/*"not in the harness trust list"*) ok "an untrusted repository is reported and its verify.sh is not run" ;;
+    *) bad "an untrusted repository is reported and its verify.sh is not run: ran=$ran, got $out" ;;
+esac
 
 printf '\n%d/%d passed\n' "$pass" "$((pass + fail))"
 [ "$fail" -eq 0 ]
