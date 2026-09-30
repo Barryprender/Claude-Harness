@@ -1,5 +1,5 @@
 #!/bin/sh
-# PreToolUse gate for git commits. This one blocks.
+# PreToolUse gate for git commits and pull requests. This one blocks.
 #
 # A commit is the moment a claim stops being provisional. Once it is pushed it
 # cannot be taken back, and its message will be read by people who were not
@@ -18,9 +18,12 @@
 #      does not help because CI runs the same edited file.
 #   4. Ask when more than one file is in the commit. One commit per file is the
 #      convention, with legitimate exceptions the operator decides on.
+#   5. Deny a `gh pr create` or `gh pr edit` whose title or body carries an
+#      attribution line. No git hook sees a pull request, so this is the only
+#      place it can be checked.
 #
-# The attribution trailer itself is not checked here any more. It is checked
-# by hooks/git/commit-msg, on the final message, which no way of spelling the
+# The attribution trailer on a commit is not checked here any more. It is
+# checked by hooks/git/commit-msg, on the final message, which no way of spelling the
 # command can get around. See docs/adr/0003-check-the-commit-message-in-git.md.
 #
 # The file count comes from the command line as well as the index. Asking git
@@ -40,7 +43,7 @@ payload=$(cat)
 # Cheap prefilter. Nearly every command this hook sees has nothing to do with
 # committing, and there is no reason to start an interpreter for those.
 case "$payload" in
-    *commit*) ;;
+    *commit*|*gh*pr*) ;;
     *) exit 0 ;;
 esac
 
@@ -104,15 +107,18 @@ except Exception:
 # shown. This walks the command the way a shell would, well enough to follow
 # the usual disguises: git -C dir, sh -c "...", a subshell, eval, cd first.
 
-OPS = set(';&|()')
+OPS = set(';&|()\n')
 REDIRECT = {'>', '>>', '<', '<<', '<<<', '>&', '<&', '&>', '&>>', '>|', '<<-'}
 SHELLS = {'sh', 'bash', 'dash', 'zsh', 'ksh', 'ash'}
 PREFIX = {'sudo', 'command', 'exec', 'time', 'env', 'nohup'}
 GIT_OPT_ARG = {'-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env'}
 
 def segments(text):
-    # Newlines separate commands; inside quotes they only become text.
-    lex = shlex.shlex(text.replace('\n', ';'), posix=True, punctuation_chars=True)
+    # A newline outside quotes separates commands, so it is punctuation, not
+    # whitespace. Inside quotes it stays a newline: a message body keeps its
+    # lines, and a trailer is still at the start of one.
+    lex = shlex.shlex(text, posix=True, punctuation_chars='();<>|&\n')
+    lex.whitespace = ' \t\r'
     lex.whitespace_split = True
     cur, skip = [], False
     for t in lex:
@@ -169,14 +175,54 @@ def walk(text, cwd, found, depth=0):
                 i += 1
             if i < len(seg) and seg[i] in ('add', 'commit'):
                 found.append((seg[i], gcwd, seg[i + 1:], conf))
+        elif prog == 'gh' and seg[1:3] in (['pr', 'create'], ['pr', 'edit']):
+            found.append(('pr', cwd, seg[3:], []))
 
 found = []
 try:
     walk(raw, os.getcwd(), found)
 except ValueError:
-    if re.search(r'\bgit\b', raw) and re.search(r'\bcommit\b', raw):
-        emit('ask', 'The commit gate could not parse this command, so it could not tell what it commits. This is not an approval. Check the staging and the message before you continue.')
+    if re.search(r'\bgit\b', raw) and re.search(r'\bcommit\b', raw) \
+            or re.search(r'\bgh\s+pr\b', raw):
+        emit('ask', 'The commit gate could not parse this command, so it could not tell what it commits or what the pull request says. This is not an approval. Check the staging and the message before you continue.')
     sys.exit(0)
+
+# --- pull requests -------------------------------------------------------------
+#
+# A pull request description is the same claim as a commit message, in a field
+# no git hook ever sees. So its title and body are read here: given inline, or
+# in a --body-file, or on stdin, where the heredoc is part of the command text.
+# The patterns are the ones hooks/git/commit-msg uses.
+
+ATTRIBUTION = re.compile(
+    r'^\s*co-authored-by\s*:'
+    r'|^[^\w]*generated (with|by) .*(claude|anthropic|openai|chatgpt|gpt-|copilot'
+    r'|gemini|codex|cursor|devin|aider|llm)',
+    re.IGNORECASE | re.MULTILINE)
+
+for kind, cwd, args, _ in found:
+    if kind != 'pr':
+        continue
+    text, unreadable = [], []
+    for i, a in enumerate(args):
+        key, eq, val = a.partition('=')
+        if not eq:
+            val = args[i + 1] if i + 1 < len(args) else ''
+        if key in ('-b', '--body', '-t', '--title'):
+            text.append(val)
+        elif key in ('-F', '--body-file'):
+            if val == '-':
+                text.append(raw)
+                continue
+            try:
+                with open(os.path.join(cwd, val), encoding='utf-8', errors='replace') as f:
+                    text.append(f.read())
+            except OSError:
+                unreadable.append(val)
+    if any(ATTRIBUTION.search(t) for t in text):
+        emit('deny', 'This pull request carries an attribution line. CLAUDE.md forbids it: never add a Co-Authored-By line or any other attribution line, in a commit or in a pull request description. Disclosure of AI assistance belongs in prose that a human stands behind. Remove the line and try again.')
+    if unreadable:
+        emit('ask', 'The pull request body is in a file the commit gate could not read (%s), so it was never checked for an attribution line. This is not an approval. Check the file before you continue.' % ', '.join(unreadable))
 
 commits = [f for f in found if f[0] == 'commit']
 if not commits:
