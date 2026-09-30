@@ -1,9 +1,14 @@
 #!/bin/sh
-# PostToolUse gate for edits, however they were made. This one blocks.
+# PostToolUse gate for edits, however they were made. Forced feedback.
 #
 # WHAT IT DOES. After an edit, it finds the project's own verify.sh and runs
-# the cheap tier of it. A failure blocks, with the failing output fed back so
-# the agent can fix it before doing anything else.
+# the cheap tier of it. A failure comes back to the agent as a block, with the
+# failing output, so fixing it is the next thing the agent does.
+#
+# WHAT "BLOCK" MEANS HERE. PostToolUse runs after the tool. The edit has
+# already happened and it stays. A block cannot undo it or prevent it; it puts
+# the failure in front of the agent before it builds anything else on top.
+# That is forced feedback, not prevention, and nothing here should claim more.
 #
 # WHY IT DELEGATES. The harness has no opinion about what green means. A
 # formatter, a linter, a test runner, a code generator that has to run first -
@@ -11,17 +16,16 @@
 # harness owns is the moment: after every edit, before anything is built on
 # top of it. See HARNESS.md for the contract verify.sh has to meet.
 #
-# WHY IT BLOCKS. A formatting or static-analysis failure has a fixed, known
-# repair, and the agent is the right one to make it. Blocking here is not the
-# same decision as blocking at the end of a turn - see stop-build.sh, which
-# reports for a reason.
+# WHERE CHANGED FILES COME FROM. The tree, never the tool payload. An earlier
+# version of this gate matched the edit tools only. A careful, surgical,
+# multi-line change is easier to make through a shell script than through an
+# edit tool, so the most careful edits were exactly the ones bypassing the
+# gate. Anything that infers what changed from the shape of the event will
+# miss whatever it did not anticipate.
 #
-# WHERE CHANGED FILES COME FROM. git status, never the tool payload. An
-# earlier version of this gate matched the edit tools only. A careful,
-# surgical, multi-line change is easier to make through a shell script than
-# through an edit tool, so the most careful edits were exactly the ones
-# bypassing the gate. Anything that infers what changed from the shape of the
-# event will miss whatever it did not anticipate.
+# The tree is compared against the state this gate last checked, which
+# turn-start.sh resets at the start of each turn. Nothing changed since the
+# last check - an ls, a git log - means nothing runs.
 #
 # Contract: reads the PostToolUse payload on stdin, writes hook JSON on stdout.
 # Never exits non-zero - a broken gate must not break the session.
@@ -30,145 +34,75 @@ set -u
 
 cat > /dev/null   # drain the payload; this gate deliberately does not read it
 
-git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
+# shellcheck source=hooks/lib.sh
+. "$(dirname "$0")/lib.sh"
+
 root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 [ -n "$root" ] || exit 0
+sd=$(state_dir "$root") || exit 0
 
 tmp=$(mktemp -d 2>/dev/null || echo "/tmp/edit-gate.$$")
 mkdir -p "$tmp" 2>/dev/null || exit 0
 trap 'rm -rf "$tmp"' EXIT
-
-# JSON string escaping, in awk rather than in an interpreter. Enough for tool
-# output: backslash, quote, tab, and the control characters that would make the
-# JSON invalid. Newlines become the two characters backslash-n.
-#
-# Keeping this gate free of python means it still works on a machine where
-# python is missing or - see the note in commit-gate.sh - present but broken.
-#
-# It compares characters one at a time rather than calling gsub. The gsub
-# version is shorter and it was wrong: a backslash in a gsub replacement is
-# processed a second time, so the escape for a quote came out as two
-# backslashes and a quote, which ends the JSON string early. Every compiler
-# error message is full of quotes, so the first real failure this gate reported
-# was unparseable. sprintf("%c", 92) has no such ambiguity.
-esc() {
-    tr -d '\000-\010\013-\037' | awk '
-        BEGIN { bs = sprintf("%c", 92); q = sprintf("%c", 34) }
-        {
-            if (NR > 1) printf "%s", bs "n"
-            out = ""
-            for (i = 1; i <= length($0); i++) {
-                c = substr($0, i, 1)
-                if (c == bs)        out = out bs bs
-                else if (c == q)    out = out bs q
-                else if (c == "\t") out = out "    "
-                else                out = out c
-            }
-            printf "%s", out
-        }'
-}
-
-# Duplicates out, order kept. This was sort -u, which on Windows is system32's
-# sort.exe: it reads -u as a second input file and dies with "Input file
-# specified two times." See the note on the marker file below.
-uniq_lines() { awk '!seen[$0]++' "$1"; }
 
 # Both of these are called directly, never on the right of a pipe: the right
 # side of a pipe is a subshell, and exiting there would let the caller carry on
 # and print a second decision after the first.
 block() { # $1 = one-line summary, $2 = detail
     printf '{"decision":"block","reason":"%s\\n\\n%s","systemMessage":"%s"}\n' \
-        "$(printf '%s' "$1" | esc)" "$(printf '%s' "$2" | esc)" "$1"
+        "$(printf '%s' "$1" | esc)" "$(printf '%s' "$2" | esc)" "$(printf '%s' "$1" | esc)"
+    exit 0
 }
 
 report() { # $1 = message
     printf '{"systemMessage":"%s"}\n' "$(printf '%s' "$1" | esc)"
+    exit 0
 }
 
-# --- what changed, and in this turn -------------------------------------------
-#
-# The two-minute window keeps this to the work just done, rather than to every
-# file left dirty from an hour ago.
+# --- what changed since the last check ----------------------------------------
 
-git status --porcelain 2>/dev/null | sed -e 's/^...//' -e 's/^.* -> //' > "$tmp/dirty"
-# A marker file stamped 120 seconds ago, so the window becomes a [ -nt ] the
-# shell does itself. This was find -newermt. On Windows, find resolves to
-# system32's find.exe, which does not know the flag, printed nothing, and made
-# every changed file look untouched - so the gate went silent, which is the one
-# outcome it exists to prevent. Any external tool whose name Windows also ships
-# is a trap of this shape.
-#
-# If neither stamp works the marker is removed and every dirty file counts.
-# That is wider than intended and it is the right way to be wrong: the gate
-# runs when it did not have to, rather than not running when it did.
-: > "$tmp/window"
-touch -d '-120 seconds' "$tmp/window" 2>/dev/null ||
-    touch -A -000200 "$tmp/window" 2>/dev/null ||
-    rm -f "$tmp/window"
+tree_state "$root" "$tmp/s" > "$tmp/now"
+[ -f "$sd/last" ] || : > "$sd/last"
+changed_paths "$sd/last" "$tmp/now" > "$tmp/changed"
+cp "$tmp/now" "$sd/last"
 
-: > "$tmp/files"
-while IFS= read -r p; do
-    [ -n "$p" ] || continue
-    f="$root/$p"
-    [ -f "$f" ] || continue
-    # -nt is outside POSIX on paper only: bash, dash, busybox ash, ksh and
-    # zsh all implement it, and shellcheck 0.11.0 dropped the warning. CI has
-    # an older shellcheck that still raises it, so it is silenced by name.
-    # shellcheck disable=SC3013
-    if [ ! -e "$tmp/window" ] || [ "$f" -nt "$tmp/window" ]; then
-        printf '%s\n' "$f" >> "$tmp/files"
-    fi
-done < "$tmp/dirty"
+[ -s "$tmp/changed" ] || exit 0
 
-[ -s "$tmp/files" ] || exit 0
+trusted "$root" || report "$(untrusted_message "$root")"
 
 # --- the project's own definition of green ------------------------------------
-#
-# verify.sh is looked for beside each changed file and upwards from there, so a
-# repository holding several projects gets the right one for the file that
-# changed rather than the one at the top.
 
-: > "$tmp/verifiers"
-while IFS= read -r f; do
-    d=$(dirname "$f")
-    while [ -n "$d" ] && [ "$d" != "/" ] && [ "$d" != "." ]; do
-        if [ -f "$d/verify.sh" ]; then
-            printf '%s\n' "$d" >> "$tmp/verifiers"
-            break
-        fi
-        [ "$d" = "$root" ] && break
-        parent=$(dirname "$d")
-        [ "$parent" = "$d" ] && break
-        d="$parent"
-    done
-done < "$tmp/files"
+verifiers_for "$root" < "$tmp/changed" > "$tmp/verifiers"
 
 if [ -s "$tmp/verifiers" ]; then
-    uniq_lines "$tmp/verifiers" > "$tmp/verifiers.u"
     while IFS= read -r d; do
-        [ -n "$d" ] || continue
         out=$(cd "$d" && sh verify.sh --fast 2>&1)
         rc=$?
         [ "$rc" -eq 0 ] && continue
 
-        detail=$(printf '%s' "$out" | sed -n '/FAILED:/,$p' | head -25)
-        [ -n "$detail" ] || detail=$(printf '%s' "$out" | tail -25)
+        detail=$(printf '%s' "$out" | failure_detail)
 
-        # Exit 1 is a real failure with a known repair: block.
+        # Exit 1 is a real failure with a known repair: block, unless it is
+        # word for word the failure this verify.sh already had at the end of
+        # the last turn. Then this edit did not cause it.
         #
         # Exit 2 is a check that could not run at all - a missing tool, a
         # service that is down. Blocking on that would trap the session in a
         # loop it cannot edit its way out of, so it is reported instead. It is
         # still never silent. Not blocking is not the same as passing.
         if [ "$rc" -eq 1 ]; then
-            block "verify.sh --fast failed after an edit. Fix this before continuing." "$detail"
-        else
-            report "verify.sh --fast could not complete (exit $rc). Nothing here has passed - a check did not run:
+            bf=$(baseline_file "$sd" "$d")
+            if [ -f "$bf" ] && [ "$(printf '%s' "$detail" | normalise)" = "$(cat "$bf")" ]; then
+                report "verify.sh --fast in $d still fails exactly as it did at the end of the last turn. This edit did not cause it, so it is reported, not blocked. It has not passed:
 
 $detail"
+            fi
+            block "verify.sh --fast failed after an edit. Fix this before continuing." "$detail"
         fi
-        exit 0
-    done < "$tmp/verifiers.u"
+        report "verify.sh --fast could not complete (exit $rc). Nothing here has passed - a check did not run:
+
+$detail"
+    done < "$tmp/verifiers"
     exit 0
 fi
 
@@ -178,33 +112,35 @@ fi
 # harness guessing at a project's checks is how two definitions of green come
 # to exist, and two definitions of green drift until there is none. Give the
 # project a verify.sh and this code stops running.
+#
+# It reads and never writes. It used to run gofmt -w, which changed the file
+# under the agent without telling it, and made "the hooks only read" untrue.
 
 command -v go >/dev/null 2>&1 || exit 0
-: > "$tmp/pkgs"
-while IFS= read -r f; do
-    case "$f" in
+: > "$tmp/go"
+while IFS= read -r p; do
+    case "$p" in
         *.go) ;;
         *) continue ;;
     esac
     # Generated files are rewritten by their generator; reporting on them names
     # problems nobody is going to fix in place.
-    case "$f" in
-        *_templ.go|*.pb.go|*_generated.go|*/vendor/*|*/node_modules/*) continue ;;
+    case "$p" in
+        *_templ.go|*.pb.go|*_generated.go|vendor/*|*/vendor/*|*/node_modules/*) continue ;;
     esac
-    [ -f "$f" ] || continue
-    [ -n "$(gofmt -l "$f" 2>/dev/null)" ] && gofmt -w "$f" 2>/dev/null
-    dirname "$f" >> "$tmp/pkgs"
-done < "$tmp/files"
+    [ -f "$root/$p" ] && printf '%s\n' "$root/$p" >> "$tmp/go"
+done < "$tmp/changed"
 
-[ -s "$tmp/pkgs" ] || exit 0
-uniq_lines "$tmp/pkgs" > "$tmp/pkgs.u"
+[ -s "$tmp/go" ] || exit 0
+
+unformatted=$(while IFS= read -r f; do gofmt -l "$f" 2>/dev/null; done < "$tmp/go")
+[ -n "$unformatted" ] && block "gofmt: files you just edited are not formatted (fallback check - this project has no verify.sh). Run gofmt -w on them." "$unformatted"
+
+while IFS= read -r f; do dirname "$f"; done < "$tmp/go" | awk '!seen[$0]++' > "$tmp/pkgs"
 while IFS= read -r d; do
-    [ -n "$d" ] || continue
     if ! out=$(cd "$d" && go vet . 2>&1); then
-        block "go vet failed on a package you just edited (fallback check - this project has no verify.sh)." \
-            "$(printf '%s' "$out" | head -25)"
-        exit 0
+        block "go vet failed on a package you just edited (fallback check - this project has no verify.sh)." "$out"
     fi
-done < "$tmp/pkgs.u"
+done < "$tmp/pkgs"
 
 exit 0
