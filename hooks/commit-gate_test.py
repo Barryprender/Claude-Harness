@@ -40,8 +40,11 @@ def repo(untracked=(), staged=(), modified=(), hook=True, body="x"):
     run(d, "git", "init", "-q")
     run(d, "git", "config", "user.email", "t@t.t")
     run(d, "git", "config", "user.name", "t")
-    if hook:
-        run(d, "git", "config", "core.hooksPath", GIT_HOOKS)
+    # Set locally either way, so a global core.hooksPath on the machine running
+    # the test cannot decide whether the hook counts as installed.
+    empty = os.path.join(d, ".git", "no-hooks")
+    os.makedirs(empty)
+    run(d, "git", "config", "core.hooksPath", GIT_HOOKS if hook else empty)
 
     def write(name, text):
         p = os.path.join(d, name)
