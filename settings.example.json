@@ -16,6 +16,13 @@
         ]
       }
     ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "sh $HOME/claude-harness/hooks/turn-start.sh" }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
