@@ -117,8 +117,8 @@ library.
 To try the edit gate yourself:
 
 ```sh
-# 0. Put this repository on the trust list. The gates run nothing without it.
-git rev-parse --show-toplevel >> ~/.claude/harness-trusted
+# 0. Mark this repository as trusted. The gates run nothing without it.
+git config harness.trusted true
 
 # 1. Run the example's checks. They pass.
 cd example
@@ -165,13 +165,16 @@ as `pre-commit`. If that matters in a repository, copy
 `hooks/git/commit-msg` into its `.git/hooks/` instead. Until the hook is
 installed one way or the other, the commit gate asks before every commit.
 
-**3. The trust list.** The hooks run in every repository you open, and they
+**3. The trust switch.** The hooks run in every repository you open, and they
 run that repository's `verify.sh`. So they only do it in a repository you have
-listed. In each repository you trust:
+marked. Run this once inside each repository you trust:
 
 ```sh
-git rev-parse --show-toplevel >> ~/.claude/harness-trusted
+git config harness.trusted true
 ```
+
+The switch lives in that repository's `.git/config`. It is never committed, so
+a clone never arrives trusted. A global setting does not count.
 
 Anywhere else they run nothing and tell you so.
 
@@ -198,7 +201,8 @@ hooks/
   edit-gate.sh              after an edit: runs verify.sh --fast, feeds a
                             failure back to the agent
   commit-gate.sh            before a commit: denies skipping git hooks, asks
-                            about multi-file commits and changes to the checks
+                            about multi-file commits and changes to the checks;
+                            denies attribution lines in gh pull requests
   stop-build.sh             end of turn: runs verify.sh --fast, reports
   turn-start.sh             prompt sent: snapshots the tree for this turn
   charter-check.sh          session start: names missing standing artifacts
