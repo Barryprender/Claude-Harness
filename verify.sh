@@ -46,16 +46,33 @@ finish() {
     exit 0
 }
 
+# --- the fast tier: every hook still parses ----------------------------------
+#
+# The edit gate runs this after every edit here, so it has to cost seconds.
+# A syntax error in a hook is the one break that takes every gate down at
+# once, and sh -n finds it without running anything.
+
+echo "sh -n hooks"
+for f in hooks/*.sh hooks/git/commit-msg hooks/git/*.sh verify.sh; do
+    if ! out=$(sh -n "$f" 2>&1); then
+        fail "sh -n $f" "$out"
+    fi
+done
+
+[ "$fast" -eq 1 ] && finish
+
 # --- the gates ----------------------------------------------------------------
 #
 # These are the whole product, and a gate that has stopped matching is silent.
-# They run in the fast tier because they take about a second and because there
-# is no version of this repository where skipping them is acceptable.
+# They are not in the fast tier: each case builds real git repositories, and
+# on Windows the suite takes minutes, which is too long to wait after every
+# edit. CI runs them on every push, and there is no version of this repository
+# where skipping them there is acceptable.
 
-for t in hooks/edit-gate_test.sh hooks/stop-build_test.sh hooks/charter-check_test.sh; do
+for t in hooks/edit-gate_test.sh hooks/stop-build_test.sh hooks/charter-check_test.sh hooks/git/commit-msg_test.sh; do
     echo "$t"
     if ! out=$(sh "$t" 2>&1); then
-        fail "$t" "$(printf '%s' "$out" | grep '^FAIL' | head -10)"
+        fail "$t" "$(printf '%s' "$out" | grep '^FAIL')"
     fi
 done
 
@@ -73,13 +90,11 @@ done
 echo "hooks/commit-gate_test.py"
 if [ -n "$PY" ]; then
     if ! out=$("$PY" hooks/commit-gate_test.py 2>&1); then
-        fail "hooks/commit-gate_test.py" "$(printf '%s' "$out" | grep '^FAIL' | head -10)"
+        fail "hooks/commit-gate_test.py" "$(printf '%s' "$out" | grep '^FAIL')"
     fi
 else
     cannot_run "hooks/commit-gate_test.py" "no working python interpreter on PATH"
 fi
-
-[ "$fast" -eq 1 ] && finish
 
 # --- the full tier ------------------------------------------------------------
 
@@ -102,7 +117,7 @@ elif [ -z "$want" ]; then
     cannot_run "shellcheck" ".shellcheck-version is missing - nothing to pin against"
 elif [ "$have" != "$want" ]; then
     cannot_run "shellcheck" "version $have, but .shellcheck-version pins $want - a different version is a different set of rules"
-elif ! out=$(shellcheck -s sh hooks/*.sh templates/go/verify.sh example/verify.sh verify.sh 2>&1); then
+elif ! out=$(shellcheck -x -s sh hooks/*.sh hooks/git/commit-msg hooks/git/*.sh templates/go/verify.sh example/verify.sh verify.sh 2>&1); then
     # Not truncated, on purpose. This was head -40, and the first CI run
     # that failed had fifteen findings - so five of them were cut off the
     # bottom of the report and looked like they did not exist. A failure
@@ -116,8 +131,8 @@ echo "example/verify.sh"
 out=$(cd example && sh verify.sh 2>&1)
 case $? in
     0) ;;
-    1) fail "example/verify.sh" "$(printf '%s' "$out" | sed -n '/FAILED:/,$p' | head -30)" ;;
-    *) cannot_run "example/verify.sh" "$(printf '%s' "$out" | sed -n '/FAILED:/,$p' | head -10)" ;;
+    1) fail "example/verify.sh" "$(printf '%s' "$out" | sed -n '/FAILED:/,$p')" ;;
+    *) cannot_run "example/verify.sh" "$(printf '%s' "$out" | sed -n '/FAILED:/,$p')" ;;
 esac
 
 finish
