@@ -1,6 +1,6 @@
 # 4. Run verify.sh only in repositories on a trust list
 
-Status: accepted, 2026-09-30
+Status: superseded by ADR 0005, 2026-09-30
 
 ## Context
 
