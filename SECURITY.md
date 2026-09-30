@@ -102,12 +102,13 @@ reporting a pass.
 ## What the hooks can do to your machine
 
 They run a repository's `verify.sh` - and, for a repository without one, `go
-vet` and `go build` - **only if you have put that repository on the trust
-list** (`~/.claude/harness-trusted`, one root per line). The hooks are wired
-globally, so without the list, opening a repository somebody else wrote and
-making one edit would run their `verify.sh` on your machine. In a repository
-that is not on the list they run nothing and say so. See
-[ADR 0004](docs/adr/0004-run-verify-only-in-trusted-repositories.md).
+vet` and `go build` - **only if you have marked that repository as
+trusted** with `git config harness.trusted true` inside it. The hooks are wired
+globally, so without the switch, opening a repository somebody else wrote and
+making one edit would run their `verify.sh` on your machine. The switch lives
+in the repository's `.git/config`, which is never committed or cloned, and a
+global setting is ignored. In an unmarked repository the hooks run nothing and
+say so. See [ADR 0005](docs/adr/0005-keep-the-trust-switch-in-each-repository.md).
 
 Trusting a repository trusts every future version of its `verify.sh`,
 including one that arrives in a pull.
