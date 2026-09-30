@@ -60,7 +60,7 @@ changed_paths "$before" "$tmp/now" > "$tmp/changed"
 
 [ -s "$tmp/changed" ] || exit 0
 
-trusted "$root" || report "$(untrusted_message "$root")"
+trusted "$root" || report "$(untrusted_message)"
 
 # --- the project's own definition of green ------------------------------------
 
