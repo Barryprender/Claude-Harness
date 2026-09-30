@@ -1,8 +1,8 @@
 # Claude-harness
 
-Four [Claude Code](https://docs.claude.com/en/docs/claude-code) hooks. They run
-your project's checks after each edit and before each commit, and they stop the
-agent when a check fails.
+Five [Claude Code](https://docs.claude.com/en/docs/claude-code) hooks and one
+git hook. They run your project's checks after each edit, feed any failure
+straight back to the agent, and stop a commit that breaks the rules.
 
 A hook is a script that Claude Code runs at a set moment, such as after a file
 edit. In this README, a **gate** is a hook that can stop the agent.
@@ -10,8 +10,8 @@ edit. In this README, a **gate** is a hook that can stop the agent.
 This repository does not make an AI agent write correct code. It makes it hard
 to ship code that has not been verified first.
 
-It is a cut-down copy of the setup I use on my own AI-assisted projects: four
-hooks, one contract, and a small Go service for the hooks to check. You can
+It is a cut-down copy of the setup I use on my own AI-assisted projects: a
+handful of hooks, one contract, and a small Go service for the hooks to check. You can
 clone it and watch a gate block a bad commit yourself.
 
 My own projects are Go services with `html/template` front ends and SQLite.
@@ -25,7 +25,7 @@ actually been used on.
 
 - `sh` and `git`. On Windows, use Git Bash.
 - Go.
-- Python 3, for the commit gate and its test.
+- Python 3, for the commit gate (it reads the command line) and its test.
 - For the full run only: `shellcheck` 0.11.0 (the version in
   `.shellcheck-version`) and `govulncheck`.
 
@@ -37,8 +37,8 @@ does not mean "passed".
 ```sh
 git clone https://github.com/Barryprender/AI-Harness.git claude-harness
 cd claude-harness
-sh verify.sh --fast          # the fast tier: the gates' own tests, about a second
-sh verify.sh                 # everything, including the example project
+sh verify.sh --fast          # the fast tier: every hook still parses
+sh verify.sh                 # everything: the gates' tests, the linter, the example
 ```
 
 The **fast tier** is the quick subset of checks. The hooks run it after every
@@ -51,7 +51,9 @@ The harness checks itself: the hooks, CI and you all run the same `verify.sh`.
 ## Watch it work
 
 Break the example service on purpose. The gate finds `example/verify.sh`, runs
-its fast tier, and blocks. It gives the failure back to the agent.
+its fast tier, and blocks. The edit has already happened - a hook that runs
+after an edit cannot undo it - so the block is forced feedback: the failure is
+the next thing the agent reads.
 
 **Bad formatting:**
 
@@ -81,16 +83,18 @@ FAIL    harness/example    1.874s
 ```
 
 **An attribution trailer on a commit** (a trailer is a line such as
-`Co-Authored-By:` at the end of a commit message):
+`Co-Authored-By:` at the end of a commit message). The git hook reads the final
+message, so it does not matter how the commit was typed:
 
 ```
-decision: deny
+Commit rejected: the message carries an attribution line.
 
-This commit carries an attribution trailer. CLAUDE.md forbids it in the
-imperative: never add a Co-Authored-By line or any other attribution line.
-The operator is the author of the commit; disclosure of AI assistance belongs
-in prose that a human stands behind, not in commit metadata. Remove the
-trailer and commit again.
+Co-Authored-By: A <a@b.c>
+
+CLAUDE.md forbids it: never add a Co-Authored-By line or any other
+attribution line. The operator is the author of the commit; disclosure of AI
+assistance belongs in prose that a human stands behind, not in commit
+metadata. Remove the line and commit again.
 ```
 
 **An old Go toolchain** (the full run, not the fast tier):
@@ -113,6 +117,9 @@ library.
 To try the edit gate yourself:
 
 ```sh
+# 0. Put this repository on the trust list. The gates run nothing without it.
+git rev-parse --show-toplevel >> ~/.claude/harness-trusted
+
 # 1. Run the example's checks. They pass.
 cd example
 sh verify.sh --fast
@@ -133,8 +140,10 @@ git checkout -- example/main.go
 
 ## Wiring it up
 
-`settings.example.json` shows the four hooks set up for Claude Code. Copy its
-`hooks` block into `~/.claude/settings.json`.
+Three steps.
+
+**1. The Claude Code hooks.** `settings.example.json` shows the five hooks set
+up. Copy its `hooks` block into `~/.claude/settings.json`.
 
 Each hook command points to `$HOME/claude-harness`:
 
@@ -142,7 +151,29 @@ Each hook command points to `$HOME/claude-harness`:
 { "type": "command", "command": "sh $HOME/claude-harness/hooks/edit-gate.sh" }
 ```
 
-If you cloned somewhere else, change that part of each of the four paths.
+If you cloned somewhere else, change that part of each of the five paths.
+
+**2. The git hook.** It checks every commit message for attribution lines:
+
+```sh
+git config --global core.hooksPath "$HOME/claude-harness/hooks/git"
+```
+
+This makes git skip every repository's own `.git/hooks`. The hook runs a
+repository's own `commit-msg` after its check, but not its other hooks, such
+as `pre-commit`. If that matters in a repository, copy
+`hooks/git/commit-msg` into its `.git/hooks/` instead. Until the hook is
+installed one way or the other, the commit gate asks before every commit.
+
+**3. The trust list.** The hooks run in every repository you open, and they
+run that repository's `verify.sh`. So they only do it in a repository you have
+listed. In each repository you trust:
+
+```sh
+git rev-parse --show-toplevel >> ~/.claude/harness-trusted
+```
+
+Anywhere else they run nothing and tell you so.
 
 Read the scripts before you do this. They are short. A hook you have not read
 is a program that gets a shell every time you edit a file.
@@ -164,18 +195,22 @@ CLAUDE.md                   the constitution: authorship, the ladder before
 HARNESS.md                  the contract: what verify.sh must guarantee, and
                             what the harness guarantees in return
 hooks/
-  edit-gate.sh              after an edit: runs verify.sh --fast, blocks
-  commit-gate.sh            before a commit: denies attribution trailers,
-                            asks about multi-file staging
+  edit-gate.sh              after an edit: runs verify.sh --fast, feeds a
+                            failure back to the agent
+  commit-gate.sh            before a commit: denies skipping git hooks, asks
+                            about multi-file commits and changes to the checks
   stop-build.sh             end of turn: runs verify.sh --fast, reports
+  turn-start.sh             prompt sent: snapshots the tree for this turn
   charter-check.sh          session start: names missing standing artifacts
+  lib.sh                    helpers the gates share
+  git/commit-msg            git hook: rejects attribution lines
   *_test.sh, *_test.py      one test per gate
 verify.sh                   this repository's own definition of green: the
                             gates' tests, the linter, the example project
 templates/go/verify.sh      a working verify.sh: gofmt, go vet, go test,
                             skip detection, govulncheck, exits 0/1/2
 example/                    a stub HTTP service for the harness to check
-settings.example.json       how the four hooks are wired up
+settings.example.json       how the five hooks are wired up
 docs/adr/                   decisions that would otherwise be reconstructed
                             from the code
 ```
@@ -251,22 +286,26 @@ build tag - a skipped test has not passed
 
 Plain `go test ./...` reports this run as a pass.
 
-### 4. Change detection comes from `git status`, not the tool payload
+### 4. Change detection comes from the tree, not the tool payload
 
 An earlier version of the edit gate only ran after the edit tools. But a
 careful multi-line change is often easier to make with a shell script than with
 an edit tool. So the most careful edits were the ones that skipped the gate.
 
 A gate that guesses *what changed* from the shape of the event will miss
-whatever it did not expect. `git status` already knows. So `edit-gate.sh` reads
-its input, throws it away, and asks `git status` what changed.
+whatever it did not expect. So `edit-gate.sh` reads its input, throws it away,
+and compares a hash of every dirty file with the last state it checked. A
+deleted file counts. A file whose old timestamp was kept counts. An `ls`
+changes nothing, so it runs nothing.
 
 ### 5. Gates are tested
 
 A gate that has silently stopped matching prints nothing, blocks nothing, and
 looks exactly like approval. No error appears in a normal session to warn you.
 
-Each gate here has a test beside it, and CI runs all four. This happened while
+Each gate here has a test beside it, and CI runs all of them. An outside
+review later found a dozen cases the tests did not cover, from `git -C . commit`
+to a deleted file. Each one now has a case that failed against the old gate. This happened while
 writing this repository. The edit gate's JSON escaping was wrong, so every real
 failure it reported could not be parsed. The test that should have caught it
 was passing, because its input had been damaged before it arrived. Both are
@@ -274,8 +313,10 @@ fixed, and both fixes are in the git history.
 
 ### 6. Disclosure lives in prose
 
-No `Co-Authored-By`, no `Generated with`, on any commit. `commit-gate.sh`
-denies them outright, and this repository's own history has none.
+No `Co-Authored-By`, no `Generated with`, on any commit. The `commit-msg` git
+hook rejects them outright, and this repository's own history has none. It
+used to be a pattern on the command line, which missed `git -C`, `sh -c` and
+`-F`; see [ADR 0003](docs/adr/0003-check-the-commit-message-in-git.md).
 
 A trailer claims authorship in a field nobody reads, with no room to qualify
 the claim. A paragraph can say what the agent did and what a person checked.
