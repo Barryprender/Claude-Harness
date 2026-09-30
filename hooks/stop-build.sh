@@ -17,7 +17,13 @@
 # that has not run there.
 #
 # So it asks the project. verify.sh is the definition of green, it is the same
-# script CI runs, and there is one of it rather than two that drift.
+# script CI runs, and there is one of it rather than two that drift. It asks
+# every verify.sh that owns a file changed this turn, found the same way the
+# edit gate finds them, so a nested project is not missed.
+#
+# "This turn" is measured against the snapshot turn-start.sh takes when the
+# operator sends a prompt. Without that snapshot, every dirty file counts:
+# wider than intended, and the right way to be wrong.
 #
 # The contract is verify.sh --fast: the cheap tier, seconds not minutes. The
 # expensive tier belongs in CI, not on the end of every turn.
@@ -29,77 +35,86 @@ set -u
 
 cat > /dev/null   # drain the payload
 
-# Nothing changed this turn: nothing to check.
-[ -n "$(git status --porcelain 2>/dev/null | head -1)" ] || exit 0
+# shellcheck source=hooks/lib.sh
+. "$(dirname "$0")/lib.sh"
 
-# JSON string escaping, one character at a time. The obvious version uses
-# gsub, and the obvious version is wrong: a backslash in a gsub replacement is
-# processed twice, so the escape for a quote came out as two backslashes and a
-# quote and ended the JSON string early. Compiler output is full of quotes.
-# Comparing characters against sprintf("%c", 92) has no such ambiguity.
-esc() {
-    tr -d '\000-\010\013-\037' | awk '
-        BEGIN { bs = sprintf("%c", 92); q = sprintf("%c", 34) }
-        {
-            if (NR > 1) printf "%s", bs "n"
-            out = ""
-            for (i = 1; i <= length($0); i++) {
-                c = substr($0, i, 1)
-                if (c == bs)        out = out bs bs
-                else if (c == q)    out = out bs q
-                else if (c == "\t") out = out "    "
-                else                out = out c
-            }
-            printf "%s", out
-        }'
-}
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+[ -n "$root" ] || exit 0
+sd=$(state_dir "$root") || exit 0
+
+tmp=$(mktemp -d 2>/dev/null || echo "/tmp/stop-build.$$")
+mkdir -p "$tmp" 2>/dev/null || exit 0
+trap 'rm -rf "$tmp"' EXIT
 
 report() { # $1 = message
     printf '{"systemMessage":"%s"}\n' "$(printf '%s' "$1" | esc)"
     exit 0
 }
 
-# --- preferred path: the project's own definition of green --------------------
+# --- what changed this turn ---------------------------------------------------
 
-verify=""
-if [ -f verify.sh ]; then
-    verify=$(pwd)
-else
-    root=$(git rev-parse --show-toplevel 2>/dev/null)
-    [ -n "$root" ] && [ -f "$root/verify.sh" ] && verify="$root"
-fi
+tree_state "$root" "$tmp/s" > "$tmp/now"
+before="$sd/start"
+[ -f "$before" ] || { : > "$tmp/empty"; before="$tmp/empty"; }
+changed_paths "$before" "$tmp/now" > "$tmp/changed"
 
-if [ -n "$verify" ]; then
-    out=$(cd "$verify" && sh verify.sh --fast 2>&1)
-    rc=$?
-    [ "$rc" -eq 0 ] && exit 0
+[ -s "$tmp/changed" ] || exit 0
 
-    # Report the collected failures, not the transcript of passes above them.
-    detail=$(printf '%s' "$out" | sed -n '/FAILED:/,$p' | head -14)
-    [ -n "$detail" ] || detail=$(printf '%s' "$out" | tail -14)
+trusted "$root" || report "$(untrusted_message "$root")"
 
-    if [ "$rc" -eq 1 ]; then
-        report "./verify.sh --fast FAILED with uncommitted changes:
+# --- the project's own definition of green ------------------------------------
 
-$detail"
-    fi
-    report "./verify.sh --fast could not complete (exit $rc). This is not a pass - a check did not run at all:
+verifiers_for "$root" < "$tmp/changed" > "$tmp/verifiers"
 
-$detail"
+if [ -s "$tmp/verifiers" ]; then
+    msg=""
+    while IFS= read -r d; do
+        out=$(cd "$d" && sh verify.sh --fast 2>&1)
+        rc=$?
+        bf=$(baseline_file "$sd" "$d")
+        if [ "$rc" -eq 0 ]; then
+            rm -f "$bf"
+            continue
+        fi
+
+        # Report the collected failures, not the transcript of passes above them.
+        detail=$(printf '%s' "$out" | failure_detail)
+        rel="${d#"$root"}"
+        rel="${rel#/}"
+        name="./${rel:+$rel/}verify.sh"
+
+        if [ "$rc" -eq 1 ]; then
+            # The baseline the edit gate compares against next turn.
+            printf '%s' "$detail" | normalise > "$bf"
+            msg="$msg$name --fast FAILED with changes made this turn:
+
+$detail
+
+"
+        else
+            msg="$msg$name --fast could not complete (exit $rc). This is not a pass - a check did not run at all:
+
+$detail
+
+"
+        fi
+    done < "$tmp/verifiers"
+    [ -n "$msg" ] && report "$msg"
+    exit 0
 fi
 
 # --- fallback: no verify.sh here yet ------------------------------------------
 #
 # Deliberately thin. Give the project a verify.sh and this stops running.
 
-[ -f go.mod ] || exit 0
+[ -f "$root/go.mod" ] || exit 0
 command -v go >/dev/null 2>&1 || exit 0
-git status --porcelain -- '*.go' 2>/dev/null | grep -q . || exit 0
+grep -q '\.go$' "$tmp/changed" || exit 0
 
-if ! out=$(go build ./... 2>&1); then
-    report "go build ./... FAILED with uncommitted Go changes (fallback check - this project has no verify.sh):
+if ! out=$(cd "$root" && go build ./... 2>&1); then
+    report "go build ./... FAILED with Go changes made this turn (fallback check - this project has no verify.sh):
 
-$(printf '%s' "$out" | head -12)"
+$out"
 fi
 
 exit 0
