@@ -1,0 +1,59 @@
+#!/bin/sh
+# claude-harness:commit-msg
+#
+# A git hook, not a Claude Code hook. It rejects a commit whose final message
+# carries an attribution line. commit-gate.sh checks that this hook is
+# installed and asks when it is not; the marker line above is what it looks for.
+#
+# WHY HERE AND NOT IN THE COMMAND LINE. The first version read the Bash command
+# and pattern-matched it. Every way of committing it had not imagined got
+# through: git -C . commit, sh -c "git commit ...", a subshell, -F with the
+# message in a file, the trailer in capitals. Git hands this hook the message
+# it is about to commit, whatever the command looked like, so there is nothing
+# left to imagine. See docs/adr/0003-check-the-commit-message-in-git.md.
+#
+# WHAT COUNTS. A Co-authored-by trailer in any capitalisation, and a line that
+# says it was generated with or by an AI tool. "Generated with protoc" is a
+# normal sentence about a normal tool and passes. Comment lines are ignored:
+# git strips them after this hook runs.
+#
+# LAZY: the tool list is a fixed pattern. A new product name gets through until
+# it is added here.
+#
+# Installed either for every repository with
+#     git config --global core.hooksPath <harness>/hooks/git
+# or for one, by copying this file to .git/hooks/commit-msg. With the global
+# path, git stops running the repository's own .git/hooks, so this hook runs
+# the repository's own commit-msg afterwards to keep it working.
+
+set -u
+
+msg=$1
+body=$(grep -v '^#' "$msg" 2>/dev/null)
+
+found=$(printf '%s\n' "$body" | grep -Ei \
+    -e '^[[:space:]]*co-authored-by[[:space:]]*:' \
+    -e '^[^[:alnum:]]*generated (with|by) .*(claude|anthropic|openai|chatgpt|gpt-|copilot|gemini|codex|cursor|devin|aider|llm)')
+
+if [ -n "$found" ]; then
+    cat >&2 <<EOF
+Commit rejected: the message carries an attribution line.
+
+$found
+
+CLAUDE.md forbids it: never add a Co-Authored-By line or any other
+attribution line. The operator is the author of the commit; disclosure of AI
+assistance belongs in prose that a human stands behind, not in commit
+metadata. Remove the line and commit again.
+EOF
+    exit 1
+fi
+
+# The repository's own commit-msg hook, when core.hooksPath has hidden it.
+# Compared by content, so a copy of this file installed there is not run twice.
+own="$(git rev-parse --git-dir 2>/dev/null)/hooks/commit-msg"
+if [ -x "$own" ] && ! cmp -s "$own" "$0"; then
+    exec "$own" "$@"
+fi
+
+exit 0
