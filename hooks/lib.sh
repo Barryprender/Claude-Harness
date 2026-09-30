@@ -39,19 +39,20 @@ esc() {
 #
 # The gates run a repository's own verify.sh. In a repository somebody else
 # wrote, that is running a stranger's code on every edit, just because the
-# repository was opened. So verify.sh runs only in a repository whose root is
-# listed, one per line, in the trust file - exactly as `git rev-parse
-# --show-toplevel` prints it. An unlisted repository is reported, never run:
+# repository was opened. So verify.sh runs only where the operator has said
+# yes, in that repository's own local git config. Each project carries its own
+# switch. It lives in .git/config, which is never committed, so a clone cannot
+# bring a yes with it. --local, so a global setting cannot say yes for every
+# repository at once. A repository without the switch is reported, never run:
 # a check that did not run has not passed.
 trusted() { # $1 = repository root
-    _t=${CLAUDE_HARNESS_TRUST:-$HOME/.claude/harness-trusted}
-    [ -f "$_t" ] && tr -d '\r' < "$_t" | grep -Fxq -- "$1"
+    [ "$(git -C "$1" config --local --bool harness.trusted 2>/dev/null)" = true ]
 }
 
-untrusted_message() { # $1 = repository root
-    printf '%s' "Nothing was verified: this repository is not in the harness trust list, so its verify.sh was not run. A repository you did not write can put anything in verify.sh. If you trust it, add it with:
+untrusted_message() {
+    printf '%s' "Nothing was verified: this repository has not been marked as trusted, so its verify.sh was not run. A repository you did not write can put anything in verify.sh. If you trust it, run this once inside it:
 
-git rev-parse --show-toplevel >> ${CLAUDE_HARNESS_TRUST:-\$HOME/.claude/harness-trusted}"
+git config harness.trusted true"
 }
 
 # --- what changed -------------------------------------------------------------
