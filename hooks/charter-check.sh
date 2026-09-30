@@ -24,8 +24,19 @@ set -u
 
 cat > /dev/null   # drain the payload
 
-# Only meaningful inside a project.
-[ -d .git ] || [ -f go.mod ] || [ -f package.json ] || exit 0
+# shellcheck source=hooks/lib.sh
+. "$(dirname "$0")/lib.sh"
+
+# Only meaningful inside a project, and always about the whole of it. Asking
+# git, not testing for a .git directory: in a worktree or a submodule .git is a
+# file, and from a subfolder there is no .git here at all. Both used to make
+# the check go silent.
+root=$(git rev-parse --show-toplevel 2>/dev/null)
+if [ -n "$root" ]; then
+    cd "$root" || exit 0
+else
+    [ -f go.mod ] || [ -f package.json ] || exit 0
+fi
 
 missing=""
 have=""
@@ -116,23 +127,6 @@ fi
 missing=$(printf '%s' "$missing" | sed 's/, $//')
 have=$(printf '%s' "$have" | sed 's/, $//')
 [ -n "$have" ] || have="none"
-
-esc() {
-    tr -d '\000-\010\013-\037' | awk '
-        BEGIN { bs = sprintf("%c", 92); q = sprintf("%c", 34) }
-        {
-            if (NR > 1) printf "%s", bs "n"
-            out = ""
-            for (i = 1; i <= length($0); i++) {
-                c = substr($0, i, 1)
-                if (c == bs)        out = out bs bs
-                else if (c == q)    out = out bs q
-                else if (c == "\t") out = out "    "
-                else                out = out c
-            }
-            printf "%s", out
-        }'
-}
 
 ctx="Standing artifacts missing from this repository: $missing.
 Present: $have.
