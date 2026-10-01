@@ -140,7 +140,7 @@ git checkout -- example/main.go
 
 ## Wiring it up
 
-Three steps.
+Four steps.
 
 **1. The Claude Code hooks.** `settings.example.json` shows the five hooks set
 up. Copy its `hooks` block into `~/.claude/settings.json`.
@@ -177,6 +177,10 @@ The switch lives in that repository's `.git/config`. It is never committed, so
 a clone never arrives trusted. A global setting does not count.
 
 Anywhere else they run nothing and tell you so.
+
+**4. Restart Claude Code.** Then every session loads the new hooks from
+`~/.claude/settings.json`. Do not rely on a session that was already open to
+pick them up.
 
 Read the scripts before you do this. They are short. A hook you have not read
 is a program that gets a shell every time you edit a file.
