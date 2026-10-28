@@ -268,5 +268,43 @@ else
     printf 'SKIP  fallback gofmt: gofmt is not installed (this is not a pass)\n'
 fi
 
+# A verify.sh that was red at the end of the last turn and passes now, where the
+# only change since is to a test file: the test may have moved to meet the code.
+# Reported, never blocked - ADR 0001, and the gate cannot tell a corrected spec
+# from a weakened one.
+d=$(scratch '#!/bin/sh
+grep -q GREEN foo_test.go 2>/dev/null && exit 0
+echo "FAILED: not green yet"
+exit 1')
+printf 'package x\n// red\n' > "$d/foo_test.go"
+(cd "$d" && printf '{}' | sh "$HOOKS/stop-build.sh" >/dev/null 2>&1)   # record the red baseline
+(cd "$d" && printf '{}' | sh "$HOOKS/turn-start.sh" >/dev/null 2>&1)   # snapshot the turn's start
+printf 'package x\n// GREEN\n' > "$d/foo_test.go"                      # only a test file changes
+got=$(decide "$d")
+rm -rf "$d"
+if [ "$got" = report ]; then
+    ok "a test-only change that turns a red verify.sh green is reported"
+else
+    bad "a test-only change that turns a red verify.sh green is reported: expected report, got $got"
+fi
+
+# The mirror: when the change that turned it green is to a non-test file, there
+# is nothing to flag. That is just a fixed bug.
+d=$(scratch '#!/bin/sh
+grep -q GREEN foo.go 2>/dev/null && exit 0
+echo "FAILED: not green yet"
+exit 1')
+printf 'package x\n// red\n' > "$d/foo.go"
+(cd "$d" && printf '{}' | sh "$HOOKS/stop-build.sh" >/dev/null 2>&1)
+(cd "$d" && printf '{}' | sh "$HOOKS/turn-start.sh" >/dev/null 2>&1)
+printf 'package x\n// GREEN\n' > "$d/foo.go"
+got=$(decide "$d")
+rm -rf "$d"
+if [ "$got" = silent ]; then
+    ok "a code change that turns a red verify.sh green is not flagged"
+else
+    bad "a code change that turns a red verify.sh green is not flagged: expected silent, got $got"
+fi
+
 printf '\n%d/%d passed\n' "$pass" "$((pass + fail))"
 [ "$fail" -eq 0 ]
