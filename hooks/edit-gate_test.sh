@@ -342,5 +342,44 @@ else
     bad "a test-only note does not suppress another verifier's block: expected block, got $got"
 fi
 
+# A soft outcome from one verifier must not drop the test-first note from
+# another, and a note's baseline must not be consumed unless the note is really
+# emitted. Project a goes green on a test-only change (a note); project b cannot
+# run (exit 2). Both signals have to survive, in one report.
+d=$(mktemp -d)
+git -C "$d" init -q .
+git -C "$d" config user.email t@t.t
+git -C "$d" config user.name t
+git -C "$d" config harness.trusted true
+mkdir -p "$d/a" "$d/b"
+cat > "$d/a/verify.sh" <<'V'
+#!/bin/sh
+grep -q GREEN foo_test.go 2>/dev/null && exit 0
+echo "FAILED: a is not green"
+exit 1
+V
+printf 'red\n' > "$d/a/foo_test.go"
+echo content > "$d/seed.txt"
+(cd "$d" && printf '{}' | sh "$HOOKS/stop-build.sh" >/dev/null 2>&1)   # a's red baseline
+(cd "$d" && printf '{}' | sh "$HOOKS/turn-start.sh" >/dev/null 2>&1)   # open a new turn
+printf 'GREEN\n' > "$d/a/foo_test.go"                                 # a goes green on a test
+cat > "$d/b/verify.sh" <<'V'
+#!/bin/sh
+echo "FAILED: b cannot run"
+exit 2
+V
+echo trigger > "$d/b/trigger.go"                                      # b cannot run
+out=$(cd "$d" && printf '{}' | sh "$GATE" 2>&1)
+rm -rf "$d"
+case "$out" in *systemMessage*) got=report ;; *'"decision":"block"'*) got=block ;; *) got=silent ;; esac
+case "$out" in *'is to a test file'*) hasnote=1 ;; *) hasnote=0 ;; esac
+case "$out" in *'could not complete'*) hassoft=1 ;; *) hassoft=0 ;; esac
+if [ "$got" = report ] && [ "$hasnote" = 1 ] && [ "$hassoft" = 1 ]; then
+    ok "a soft outcome elsewhere keeps the test-first note, both in one report"
+else
+    bad "a soft outcome elsewhere keeps the test-first note: got $got note=$hasnote soft=$hassoft
+      $out"
+fi
+
 printf '\n%d/%d passed\n' "$pass" "$((pass + fail))"
 [ "$fail" -eq 0 ]
