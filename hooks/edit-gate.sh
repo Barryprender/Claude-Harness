@@ -90,28 +90,31 @@ trusted "$root" || report "$(untrusted_message)"
 verifiers_for "$root" < "$tmp/changed" > "$tmp/verifiers"
 
 if [ -s "$tmp/verifiers" ]; then
-    # The test-first note is collected here, not reported from inside the loop.
-    # A block is the strongest outcome and must win over an informational note,
-    # so nothing on the pass path may exit the loop: a later verifier still has
-    # to get its turn to block. The note is emitted after the loop, which is
-    # only reached when no verifier blocked.
+    # Every soft outcome is collected, never reported from inside the loop: a
+    # block is the strongest result and must win, so a later verifier always
+    # gets its turn to block before anything soft is said. Only block exits the
+    # loop. Whatever is collected is emitted together after it - which is
+    # reached only when nothing blocked - so no signal is dropped and none is
+    # cut short. $tmp/clear holds the baselines a test-first note describes;
+    # they are removed only once that note is actually emitted, never before.
     note=""
+    : > "$tmp/clear"
     while IFS= read -r d; do
         out=$(cd "$d" && sh verify.sh --fast 2>&1)
         rc=$?
 
         # It passes now. If it was failing at the end of the last turn, and the
         # only thing changed since then is a test file, the test moved to meet
-        # the code rather than the code to meet the test. Note that once
-        # (clearing the baseline so it fires once), never block: ADR 0001, and
-        # a gate cannot tell a corrected spec from a weakened one. The baseline
-        # is cleared next turn by stop-build.sh on a clean pass either way.
+        # the code rather than the code to meet the test. Collect that, never
+        # block: ADR 0001, and a gate cannot tell a corrected spec from a
+        # weakened one. The baseline is cleared when the note is emitted, so the
+        # note fires once; stop-build.sh clears it next turn on a clean pass too.
         if [ "$rc" -eq 0 ]; then
             bf=$(baseline_file "$sd" "$d")
             if [ -f "$bf" ]; then
                 rel="${d#"$root"}"; rel="${rel#/}"
                 if dir_paths "$rel" < "$tmp/turnchanged" | only_tests; then
-                    rm -f "$bf"
+                    printf '%s\n' "$bf" >> "$tmp/clear"
                     note="${note}verify.sh --fast in $d passes now, but every change since it failed at the end of the last turn is to a test file. Check the test was changed because the spec was wrong, not to turn a red test green.
 
 "
@@ -124,28 +127,39 @@ if [ -s "$tmp/verifiers" ]; then
 
         # Exit 1 is a real failure with a known repair: block, unless it is
         # word for word the failure this verify.sh already had at the end of
-        # the last turn. Then this edit did not cause it.
+        # the last turn. Then this edit did not cause it, so it is collected
+        # like any other soft outcome rather than blocking an unrelated edit.
         #
         # Exit 2 is a check that could not run at all - a missing tool, a
         # service that is down. Blocking on that would trap the session in a
-        # loop it cannot edit its way out of, so it is reported instead. It is
+        # loop it cannot edit its way out of, so it is collected instead. It is
         # still never silent. Not blocking is not the same as passing.
         if [ "$rc" -eq 1 ]; then
             bf=$(baseline_file "$sd" "$d")
             if [ -f "$bf" ] && [ "$(printf '%s' "$detail" | normalise)" = "$(cat "$bf")" ]; then
-                report "verify.sh --fast in $d still fails exactly as it did at the end of the last turn. This edit did not cause it, so it is reported, not blocked. It has not passed:
+                note="${note}verify.sh --fast in $d still fails exactly as it did at the end of the last turn. This edit did not cause it, so it is reported, not blocked. It has not passed:
 
-$detail"
+$detail
+
+"
+                continue
             fi
             block "verify.sh --fast failed after an edit. Fix this before continuing." "$detail"
         fi
-        report "verify.sh --fast could not complete (exit $rc). Nothing here has passed - a check did not run:
+        note="${note}verify.sh --fast in $d could not complete (exit $rc). Nothing here has passed - a check did not run:
 
-$detail"
+$detail
+
+"
     done < "$tmp/verifiers"
-    # Reached only when no verifier blocked. A test-only pass is worth a look,
-    # but it is the weakest signal here, so it is said last and only on its own.
-    [ -n "$note" ] && report "$note"
+    # Reached only when nothing blocked. Clear the baselines whose test-first
+    # note we are about to emit - only now, so a block that exited the loop
+    # above never consumed a warning that was never printed - then report
+    # everything collected, in one message.
+    if [ -n "$note" ]; then
+        while IFS= read -r bf; do [ -n "$bf" ] && rm -f "$bf"; done < "$tmp/clear"
+        report "$note"
+    fi
     exit 0
 fi
 
