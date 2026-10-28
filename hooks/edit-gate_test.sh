@@ -306,5 +306,41 @@ else
     bad "a code change that turns a red verify.sh green is not flagged: expected silent, got $got"
 fi
 
+# The test-first note must never suppress a block from another verifier. Two
+# projects: one flips green on a test-only change (a note), the other fails
+# fresh (a block). The block has to win, whichever verifier runs first. This is
+# the fail-open regression the pass path introduced, and the reason it collects
+# the note and carries on instead of reporting from inside the loop.
+d=$(mktemp -d)
+git -C "$d" init -q .
+git -C "$d" config user.email t@t.t
+git -C "$d" config user.name t
+git -C "$d" config harness.trusted true
+mkdir -p "$d/a" "$d/b"
+cat > "$d/a/verify.sh" <<'V'
+#!/bin/sh
+grep -q GREEN foo_test.go 2>/dev/null && exit 0
+echo "FAILED: a is not green"
+exit 1
+V
+printf 'red\n' > "$d/a/foo_test.go"
+echo content > "$d/seed.txt"
+(cd "$d" && printf '{}' | sh "$HOOKS/stop-build.sh" >/dev/null 2>&1)   # a's red baseline
+(cd "$d" && printf '{}' | sh "$HOOKS/turn-start.sh" >/dev/null 2>&1)   # open a new turn
+printf 'GREEN\n' > "$d/a/foo_test.go"                                 # a goes green on a test
+cat > "$d/b/verify.sh" <<'V'
+#!/bin/sh
+echo "FAILED: b is broken"
+exit 1
+V
+echo code > "$d/b/code.go"                                            # b fails fresh
+got=$(decide "$d")
+rm -rf "$d"
+if [ "$got" = block ]; then
+    ok "a test-only note does not suppress another verifier's block"
+else
+    bad "a test-only note does not suppress another verifier's block: expected block, got $got"
+fi
+
 printf '\n%d/%d passed\n' "$pass" "$((pass + fail))"
 [ "$fail" -eq 0 ]
