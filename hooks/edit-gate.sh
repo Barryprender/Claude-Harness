@@ -90,13 +90,19 @@ trusted "$root" || report "$(untrusted_message)"
 verifiers_for "$root" < "$tmp/changed" > "$tmp/verifiers"
 
 if [ -s "$tmp/verifiers" ]; then
+    # The test-first note is collected here, not reported from inside the loop.
+    # A block is the strongest outcome and must win over an informational note,
+    # so nothing on the pass path may exit the loop: a later verifier still has
+    # to get its turn to block. The note is emitted after the loop, which is
+    # only reached when no verifier blocked.
+    note=""
     while IFS= read -r d; do
         out=$(cd "$d" && sh verify.sh --fast 2>&1)
         rc=$?
 
         # It passes now. If it was failing at the end of the last turn, and the
         # only thing changed since then is a test file, the test moved to meet
-        # the code rather than the code to meet the test. Report that once
+        # the code rather than the code to meet the test. Note that once
         # (clearing the baseline so it fires once), never block: ADR 0001, and
         # a gate cannot tell a corrected spec from a weakened one. The baseline
         # is cleared next turn by stop-build.sh on a clean pass either way.
@@ -106,7 +112,9 @@ if [ -s "$tmp/verifiers" ]; then
                 rel="${d#"$root"}"; rel="${rel#/}"
                 if dir_paths "$rel" < "$tmp/turnchanged" | only_tests; then
                     rm -f "$bf"
-                    report "verify.sh --fast in $d passes now, but every change since it failed at the end of the last turn is to a test file. Check the test was changed because the spec was wrong, not to turn a red test green."
+                    note="${note}verify.sh --fast in $d passes now, but every change since it failed at the end of the last turn is to a test file. Check the test was changed because the spec was wrong, not to turn a red test green.
+
+"
                 fi
             fi
             continue
@@ -135,6 +143,9 @@ $detail"
 
 $detail"
     done < "$tmp/verifiers"
+    # Reached only when no verifier blocked. A test-only pass is worth a look,
+    # but it is the weakest signal here, so it is said last and only on its own.
+    [ -n "$note" ] && report "$note"
     exit 0
 fi
 
