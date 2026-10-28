@@ -27,6 +27,12 @@
 # turn-start.sh resets at the start of each turn. Nothing changed since the
 # last check - an ls, a git log - means nothing runs.
 #
+# WHAT ELSE IT REPORTS. If verify.sh was failing at the end of the last turn
+# and passes now because the only files changed since are tests, it says so and
+# hands the decision back. That is the one case where a green run is worth a
+# second look: the test may have moved to meet the code. It is reported, never
+# blocked - a gate cannot tell a corrected spec from a weakened one.
+#
 # Contract: reads the PostToolUse payload on stdin, writes hook JSON on stdout.
 # Never exits non-zero - a broken gate must not break the session.
 
@@ -66,6 +72,15 @@ tree_state "$root" "$tmp/s" > "$tmp/now"
 changed_paths "$sd/last" "$tmp/now" > "$tmp/changed"
 cp "$tmp/now" "$sd/last"
 
+# What changed since this turn began, for the test-first report below. The
+# baseline that report keys on is written at the end of the previous turn, and
+# turn-start.sh snapshots the tree into start at that same moment.
+if [ -f "$sd/start" ]; then
+    changed_paths "$sd/start" "$tmp/now" > "$tmp/turnchanged"
+else
+    : > "$tmp/turnchanged"
+fi
+
 [ -s "$tmp/changed" ] || exit 0
 
 trusted "$root" || report "$(untrusted_message)"
@@ -75,10 +90,35 @@ trusted "$root" || report "$(untrusted_message)"
 verifiers_for "$root" < "$tmp/changed" > "$tmp/verifiers"
 
 if [ -s "$tmp/verifiers" ]; then
+    # The test-first note is collected here, not reported from inside the loop.
+    # A block is the strongest outcome and must win over an informational note,
+    # so nothing on the pass path may exit the loop: a later verifier still has
+    # to get its turn to block. The note is emitted after the loop, which is
+    # only reached when no verifier blocked.
+    note=""
     while IFS= read -r d; do
         out=$(cd "$d" && sh verify.sh --fast 2>&1)
         rc=$?
-        [ "$rc" -eq 0 ] && continue
+
+        # It passes now. If it was failing at the end of the last turn, and the
+        # only thing changed since then is a test file, the test moved to meet
+        # the code rather than the code to meet the test. Note that once
+        # (clearing the baseline so it fires once), never block: ADR 0001, and
+        # a gate cannot tell a corrected spec from a weakened one. The baseline
+        # is cleared next turn by stop-build.sh on a clean pass either way.
+        if [ "$rc" -eq 0 ]; then
+            bf=$(baseline_file "$sd" "$d")
+            if [ -f "$bf" ]; then
+                rel="${d#"$root"}"; rel="${rel#/}"
+                if dir_paths "$rel" < "$tmp/turnchanged" | only_tests; then
+                    rm -f "$bf"
+                    note="${note}verify.sh --fast in $d passes now, but every change since it failed at the end of the last turn is to a test file. Check the test was changed because the spec was wrong, not to turn a red test green.
+
+"
+                fi
+            fi
+            continue
+        fi
 
         detail=$(printf '%s' "$out" | failure_detail)
 
@@ -103,6 +143,9 @@ $detail"
 
 $detail"
     done < "$tmp/verifiers"
+    # Reached only when no verifier blocked. A test-only pass is worth a look,
+    # but it is the weakest signal here, so it is said last and only on its own.
+    [ -n "$note" ] && report "$note"
     exit 0
 fi
 

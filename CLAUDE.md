@@ -51,9 +51,10 @@ The ladder runs *after* understanding the problem, not instead of it. Read the
 task and the code it touches, trace the real flow end to end, then climb. The
 smallest change in the wrong place is not lazy, it is a second bug.
 
-A bug report names a symptom. Fix the shared function once and check its
-callers; patching only the path the report names leaves a sibling caller
-broken.
+A bug report names a symptom. Write the test that reproduces it first, and see
+it fail — that red test is the spec for the fix. Then fix the shared function
+once and check its callers; patching only the path the report names leaves a
+sibling caller broken, and the same test proves the siblings are fixed too.
 
 - No abstractions that were not requested. No boilerplate nobody asked for.
 - Deletion over addition. Boring over clever. Fewest files possible.
@@ -63,8 +64,8 @@ broken.
 
 - Input validation at trust boundaries, error handling that prevents data loss,
   security, accessibility, and anything explicitly requested.
-- One runnable check behind non-trivial logic: the smallest thing that fails if
-  the logic breaks. Trivial one-liners need none.
+- One runnable check behind non-trivial logic, written first and seen failing:
+  the smallest thing that fails if the logic breaks. Trivial one-liners need none.
 - The gates themselves, and their tests.
 
 ## Commits

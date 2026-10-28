@@ -157,3 +157,30 @@ normalise() {
 baseline_file() { # $1 = state dir, $2 = verifier dir
     printf '%s/baseline.%s' "$1" "$(printf '%s' "$2" | cksum | cut -d' ' -f1)"
 }
+
+# --- test-first ---------------------------------------------------------------
+#
+# Used only to report, never to block: a wrong guess prints a note and nothing
+# more, so the pattern set stays small and common across languages. A gate
+# cannot read intent from a diff; this only names a shape worth a look.
+#
+# LAZY: a fixed set of test-file name patterns (Go _test.go, Python test_*.py
+# and *_test.py, JS/TS *.test.* and *.spec.*, shell *_test.sh). A project with
+# an unusual convention is simply not flagged - the safe direction, since the
+# only cost of a miss here is a note not printed. Upgrade path: let verify.sh
+# name its own test files.
+only_tests() { # stdin = paths; true when there is at least one and all are tests
+    awk '
+        { n++
+          p = $0; sub(/.*\//, "", p)          # basename
+          if (p ~ /_test\./ || p ~ /_test$/ || p ~ /\.test\./ ||
+              p ~ /\.spec\./ || p ~ /^test_/) next
+          bad = 1 }
+        END { exit (n > 0 && !bad) ? 0 : 1 }'
+}
+
+# Paths from stdin that sit under a repository-relative directory. An empty
+# directory means the repository root, so everything passes through.
+dir_paths() { # $1 = relative dir ('' = root); stdin = paths
+    if [ -z "$1" ]; then cat; else awk -v p="$1/" 'index($0, p) == 1'; fi
+}
